@@ -1,0 +1,2286 @@
+```{r}
+# Loading Libraries
+library(tidyverse)
+library(haven)
+library(MASS)
+library(broom)
+library(knitr)
+library(modelsummary)
+library(lavaan)
+library(semPlot)
+library(kml)
+library(gbmt)
+library(broom.mixed)
+library(sjPlot)
+library(Amelia)
+library(lars)
+library(selectiveInference)
+library(glue)
+library(kableExtra)
+library(gt)
+library(gtsummary)
+library(here)
+```
+
+# Loading data
+
+Loading data earlier created
+
+```{r}
+load(here::here("code", "ace4.RData"))
+```
+
+I create another dataframe to store the yearly counts of their ACEs.
+
+```{r}
+# Rename Y7 variables
+aces <- aces %>%
+  rename(afb = ck7preg1endage,
+         npartners = ck7childrenpartners)
+
+
+# Yearly ACE count (cumulative hypothesis)
+pre_count_ace <- aces %>%
+  
+  rename(pov_2_cumu = ace_pov_2_cumu,
+         pov_3_cumu = ace_pov_3_cumu,
+         pov_4_cumu = ace_pov_4_cumu,
+         pov_5_cumu = ace_pov_5_cumu,
+         
+         instability_2_cumu = ace_instability_2_cumu,
+         instability_3_cumu = ace_instability_3_cumu,
+         instability_4_cumu = ace_instability_4_cumu,
+         instability_5_cumu = ace_instability_5_cumu,
+         
+         threat_2_cumu = ace_threat_2_cumu,
+         threat_3_cumu = ace_threat_3_cumu,
+         threat_4_cumu = ace_threat_4_cumu,
+         threat_5_cumu = ace_threat_5_cumu,
+         
+         deprive_2_cumu = ace_deprive_2_cumu,
+         deprive_3_cumu = ace_deprive_3_cumu,
+         deprive_4_cumu = ace_deprive_4_cumu,
+         deprive_5_cumu = ace_deprive_5_cumu,
+         ) %>%
+  
+  dplyr::select(idnum, 
+                
+                # Outcome var
+                bmi_6, depression, anxiety,
+                
+                # Indep var
+                ends_with("cumu"),
+                -starts_with("ace_"),
+                
+                # Mediators
+                ever_alcohol, ever_cig, ever_drugs,
+                internal, external,
+              
+                # Demographic variables
+                male, ethnic, m_race, m_edu, m_age,
+                
+                # Epigenetic clock data
+                grimAge_5, grimAge_5_resid, phenoage_5, phenoage_5_resid,  
+                grimAge_6, grimAge_6_resid, phenoage_6, phenoage_6_resid,
+                duned_5, duned_6, bmi_prs) 
+
+```
+
+Impute to bolster sampling size
+
+```{r}
+# Setting seed for reproducibility
+set.seed(123)
+
+to_impute <- pre_count_ace
+
+imputed <- amelia(data.frame(to_impute),
+                    noms = c("male", "ethnic", "m_race","m_edu",
+                             "ever_cig", "ever_drugs", "ever_alcohol"),
+                    ords = c("pov_2_cumu", "pov_3_cumu", "pov_4_cumu", "pov_5_cumu", 
+                             "instability_2_cumu", "instability_3_cumu", "instability_4_cumu", "instability_5_cumu",
+                             "threat_2_cumu", "threat_3_cumu", "threat_4_cumu", "threat_5_cumu", 
+                             "deprive_2_cumu", "deprive_3_cumu", "deprive_4_cumu", "deprive_5_cumu"),
+                    idvars = c("idnum"),
+                    m = 1, boot.type = "none", p2s = 0)
+
+count_ace <- imputed$imputations$imp1
+
+
+post_count_ace <- count_ace %>%  
+  group_by(idnum) %>%
+  mutate(ace_12mo = sum(pov_2_cumu, instability_2_cumu, threat_2_cumu, deprive_2_cumu),
+         ace_36mo = sum(pov_3_cumu, instability_3_cumu, threat_3_cumu, deprive_3_cumu),
+         ace_60mo = sum(pov_4_cumu, instability_4_cumu, threat_4_cumu, deprive_4_cumu),
+         ace_108mo = sum(pov_5_cumu,instability_5_cumu, threat_5_cumu, deprive_5_cumu)) %>%
+  ungroup() %>%
+  
+  dplyr::select(idnum,
+                
+                # Outcome var
+                bmi_6, depression, anxiety,
+                
+                # Mediators
+                ever_alcohol, ever_cig, ever_drugs,
+                internal, external,
+                
+                # Epigenetic clock data
+                grimAge_6_resid, phenoage_6_resid, duned_6,
+                grimAge_5_resid, phenoage_5_resid, duned_5,
+                
+                # Indep var
+                ace_12mo, ace_36mo, ace_60mo, ace_108mo,
+                starts_with("ace_") & ends_with("_cumu"),
+                
+                # Demographic variables
+                male, ethnic, m_race, m_edu, m_age, bmi_prs
+                ) %>%
+  mutate(male = as.factor(male),
+         ethnic = as.factor(ethnic),
+         m_race = as.factor(m_race),
+         m_edu = as.factor(m_edu)) 
+```
+
+# Descriptive statistics
+
+```{r}
+post_count_ace %>%
+  group_by(male) %>%
+  summarise(n = n(),
+            mean_1 = mean(external),
+            sd_1 = sd(external),
+            mean_3 = mean(internal),
+            sd_3 = sd(internal),
+            mean_5 = mean(ever_drugs),
+            sd_5 = sd(ever_drugs),
+            mean_9 = mean(ace_108mo),
+            sd_9 = sd(ace_108mo)
+            )
+```
+
+
+
+# Creating SCLMA functions
+
+Initialising hypotheses and creating recency/accumulation variables
+
+```{r}
+ # defining criteria for function
+outcome = "grimAge_6_resid" 
+
+ace = c("ace_12mo", "ace_36mo", "ace_60mo", "ace_108mo")
+adver = "ace"  
+
+# Generate vector of sensitive periods containing the word 'ace'
+exposures <- grep(paste0("^", adver), colnames(post_count_ace), value = T) 
+covars = c("male", "ethnic", "m_race", "m_edu", "m_age") # list of covariates
+hypos = c("accumulation", "recency") # Theoretical models considered 
+
+# Number of years considered
+recency.vec = c(1,3,5,9) # Weights for ACE exposure at each wave
+names(recency.vec) <- adver
+```
+
+Creating function to attach various life course hypotheses into the dataframe
+
+```{r}
+hypFunc <- function(dataset, male){
+  
+  # Making sure got no NA in dataframe 
+  df <- dataset %>% filter(rowSums(is.na(.[,c(exposures,covars)])) == 0) 
+  exp <- do.call("cbind", lapply(df[, exposures], function(x) as.numeric(as.character(x))))
+  
+  # Entering life course hypotheses into dataframe
+  df <- df%>% 
+  mutate(accumulation = rowSums(exp)) %>% 
+  mutate(recency = rowSums(exp %*% diag(recency.vec)))
+  
+  # Creating dataframe by gender
+  df_male <- df %>%
+    dplyr::filter(male == 1)
+  df_female <- df %>%
+    dplyr::filter(male == 0)
+  
+  # Conditional return type of dataframe
+  if(male == 1){
+    return(df_male)
+  } else if(male == 2){
+    return(df_female)
+  } else if(male == 0){
+    return(df)
+  } else{
+    return("Select 0 for all, 1 for male, 2 for female")
+  }
+}
+```
+
+Defining categorical variables
+
+```{r}
+cat.covars <- c("male", "ethnic", "m_race", "m_edu")
+```
+
+Creating function to conduct SCLMA analyses
+
+```{r}
+SCLMAfun <- function(df, steps){
+  step <- steps  # Store the number of steps in the 'step' variable
+  categoricals <- model.matrix(as.formula(paste0("~", paste(cat.covars, collapse = "+"))), df)[,-1]  # Create dummy variables for categorical predictors
+  covariates <- as.matrix(cbind(categoricals, as.matrix(df[,setdiff(covars, cat.covars)])))  # Combine dummy variables with other covariates
+  hypothesis_vars <- do.call("cbind", lapply(df[, c(exposures, hypos)], function(x) as.numeric(as.character(x))))  # Combine exposure and hypothesis variables
+
+  # Residualizing X on covariates
+  hypothesis_residuals <- lm(hypothesis_vars ~ covariates)$resid  # Calculate residuals of hypothesis_vars after regressing on covariates
+  
+  ## Frish-Waugh-Lovell - Residualizing Y on covariates as well to reduce confounding bias
+  y <- df[, "grimAge_6_resid"]
+  y <- lm(grimAge_6_resid ~ covariates, data = df)$resid  # Calculate residuals of 'grimAge_6_resid' after regressing on covariates
+
+  # Running least angle regression to select model  
+  lars_model <- lars(hypothesis_residuals, y)  # Perform least angle regression
+  num_actions <- length(lars_model$actions)  # Get the total number of iterations
+  variables <- numeric(num_actions)  # Initialize vector to store the number of variables in each model
+  selected_vars <- vector("list", num_actions)  # Initialize list to store selected variables for each model
+
+  # Iterate through all different models
+  for(action in 1:num_actions) {
+    variables[action] <- sum(lars_model$beta[as.character(action), ] != 0)  # Count the number of non-zero coefficients
+    selected_vars[[action]] <- attributes(which(lars_model$beta[as.character(action),] != 0))$names  # Store the names of selected variables
+  }
+  
+  added_vars <- character(num_actions)  # Initialize vector to store added variables
+  
+  # Iterate through models to identify added variables
+  for(action in 2:num_actions) {
+    current_selection <- lars_model$beta[as.character(action-1), ] != 0  # Get variables selected in the previous model
+    new_selection <- lars_model$beta[as.character(action), ] != 0  # Get variables selected in the current model
+    if(variables[action] > variables[action-1]) {  # Check if the current model has more variables than the previous one
+      added_vars[action] <- dimnames(hypothesis_residuals)[[2]][new_selection != current_selection]  # Store added variables
+    }
+  }
+
+  added_vars[1] <- selected_vars[1]  # Store selected variables for the first model
+
+  # Generating Elbow plot
+  par(mar=c(5,4,4,5)+0.1)
+  plot(c(0, variables), lars_model$R2, type='l',  # Plot model R-squared values
+       xlab="Variables selected", ylab="R-squared")
+  text(c(0, variables), rep(0, max(variables)+1),
+       labels=c("", added_vars), srt=90, adj=0)  # Add labels for selected variables to the plot
+
+  # Post-selected inference 
+  sumsq <- lars_model$normx  # Get normalization factor
+  x_normalised <- scale(hypothesis_residuals, scale = sumsq)  # Normalize hypothesis_residuals
+  
+  # Create output
+  inference_results <- fixedLassoInf(x_normalised, y, lars_model$beta[step+1,], lars_model$lambda[step+1], alpha = 0.05)  # Perform selective inference
+  scale <- sumsq[inference_results$vars]  # Get scaling factor
+  inference_results$coef0 <- inference_results$coef0/scale  # Scale intercept
+  inference_results$sd <- inference_results$sd/scale  # Scale standard deviation
+  inference_results$ci <- inference_results$ci/cbind(scale, scale)  # Scale confidence intervals
+  inference_results$vars <- names(inference_results$vars)  # Get names of selected variables
+  
+  # Print selectiveInference result
+  print("selectiveInference result:")
+  inference_results.res <- as.data.frame(cbind(inference_results$vars, inference_results$coef0, inference_results$sd, inference_results$pv, inference_results$ci))  # Create dataframe for results
+  colnames(inference_results.res) <- c("Variable", "Beta", "SE", "Pvalue", "CI.lo", "CI.up")  # Rename columns
+  inference_results.res[,-1] <- lapply(inference_results.res[,-1], function(x) round(as.numeric(as.character(x)), 4))  # Round numerical values
+  print(inference_results.res)  # Print results
+  sI.res <- knitr::kable(inference_results.res)  # Convert results to kable format
+  
+  print(knitr::kable(inference_results.res))  # Print kable format
+  
+  # Print p-value with more decimal points
+  print("p-value with more decimal points:")
+  print(inference_results$pv)  # Print p-values
+}
+
+```
+
+# All-inclusive ACE 
+
+Conducting SCLMA for both genders considered together 
+
+```{r}
+df <- hypFunc(post_count_ace, 0)
+set.seed(123)
+SCLMAfun(df, 1)
+```
+
+Results suggest a 3-year sensitive period
+
+## Multivariable OLS
+
+```{r}
+# Combined gender
+epi_pool <- lm(grimAge_6_resid ~ ace_36mo + male + ethnic + m_race + m_edu + m_age, data = df)
+```
+
+## Mediation analyses
+
+```{r}
+library(mediation)
+
+# Depression
+
+mediate_model <- lm(depression ~ ace_36mo + male + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + male + ethnic + m_race + m_edu + m_age + 
+               depression, data = df)
+
+cov_list <- "male + ethnic + m_race + m_edu + m_age"
+
+results_dep <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "depression",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_dep)
+```
+
+
+```{r}
+# Externalising behaviour mediator
+mediate_model <- lm(external ~ ace_36mo + male + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + male + ethnic + m_race + m_edu + m_age + 
+               external, data = df)
+
+cov_list <- "male + ethnic + m_race + m_edu + m_age"
+
+results_ext <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "external",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_ext)
+```
+
+
+```{r}
+# Internalising behaviour mediator
+mediate_model <- lm(internal ~ ace_36mo + male + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + male + ethnic + m_race + m_edu + m_age + 
+               internal, data = df)
+
+results_int <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "internal",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_int)
+```
+
+
+```{r}
+# Drug abuse
+mediate_model <- lm(ever_drugs ~ ace_36mo + male + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + male + ethnic + m_race + m_edu + m_age + 
+               ever_drugs, data = df)
+
+results_drugs <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_drugs",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_drugs)
+```
+
+
+```{r}
+# Cigarettes
+mediate_model <- lm(ever_cig ~ ace_36mo + male + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + male + ethnic + m_race + m_edu + m_age + 
+               ever_cig, data = df)
+
+results_cig <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_cig",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_cig)
+```
+
+
+```{r}
+# Alcohol
+mediate_model <- lm(ever_alcohol ~ ace_36mo + male + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + male + ethnic + m_race + m_edu + m_age + 
+               ever_alcohol, data = df)
+
+results_alcohol <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_alcohol",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_alcohol)
+
+```
+```{r}
+# BMI
+mediate_model <- lm(bmi_6 ~ ace_36mo + male + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + male + ethnic + m_race + m_edu + m_age + 
+               bmi_6, data = df)
+
+results_bmi <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "bmi_6",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+
+summary(results_bmi)
+```
+
+
+# All-inclusive Male
+
+```{r}
+df <- hypFunc(post_count_ace, 1)
+SCLMAfun(df,1)
+```
+
+## Multivariable OLS
+
+```{r}
+# Male
+epi_male <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+```
+
+## Mediation analyses
+
+```{r}
+cov_list <- "ethnic + m_race + m_edu + m_age"
+
+# Externalising behaviour mediator
+mediate_model <- lm(external ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               external, data = df)
+
+cov_list_gender <- "ethnic + m_race + m_edu + m_age"
+
+results_ext <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "external",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+
+summary(results_ext)
+```
+
+
+```{r}
+# Internalising behaviour mediator
+
+mediate_model <- lm(internal ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               internal, data = df)
+
+results_int <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "internal",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_int)
+```
+
+
+```{r}
+# Drug abuse
+mediate_model <- lm(ever_drugs ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               ever_drugs, data = df)
+
+results_drugs <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_drugs",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_drugs)
+```
+
+
+```{r}
+# Cigarettes
+mediate_model <- lm(ever_cig ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               ever_cig, data = df)
+
+results_cig <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_cig",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_cig)
+```
+
+
+```{r}
+# Alcohol
+mediate_model <- lm(ever_alcohol ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               ever_alcohol, data = df)
+
+results_alcohol <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_alcohol",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_alcohol)
+```
+
+```{r}
+# BMI
+mediate_model <- lm(bmi_6 ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               bmi_6, data = df)
+
+results_bmi <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "bmi_6",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_bmi)
+```
+
+```{r}
+# Depression
+mediate_model <- lm(depression ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               depression, data = df)
+
+results_depression <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "depression",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+
+summary(results_depression)
+```
+
+# All-inclusive Female
+
+```{r}
+df <- hypFunc(post_count_ace, 2)
+SCLMAfun(df,3)
+```
+
+## Multivariable OLS
+
+```{r}
+# Female
+epi_female <- lm(grimAge_6_resid ~ ace_36mo + ace_60mo + ace_108mo +
+               ethnic + m_race + m_edu + m_age, data = df)
+```
+
+Table to compare results
+
+```{r}
+n <- "***p < 0.001; **p < 0.01; *p < 0.05 "
+
+all_inclusive <- modelsummary(list("Pooled" = epi_pool,
+                  "Male" = epi_male,
+                  "Female" = epi_female),
+             stars = T,
+             estimate = "{estimate}{stars} [{conf.low}, {conf.high}]",
+             coef_rename = c("ace_36mo" = "Age 3 sensitive period",
+                             "ace_108mo" = "Age 9 sensitive period",
+                             "ace_60mo" = "Age 5 sensitive period",
+                             "ace_12mo" = "Age 1 sensitive period",
+                             "ace_12mo:male1" = "Age 1 X Male"),
+             gof_omit = "AIC|BIC|RMSE|Log|F|R2",
+             coef_omit = 3:14,
+             fmt = 2,
+             align = "llll", 
+             statistic = NULL, 
+             output = "gt",
+             notes = n
+             ) %>%
+  tab_options(table.width = pct(100),
+              table.font.size=13)
+```
+
+## Mediation analyses
+
+```{r}
+# Externalising behaviour mediator
+mediate_model <- lm(external ~ ace_36mo + ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               external, data = df)
+
+cov_list_gender <- "ethnic + m_race + m_edu + m_age"
+
+results_ext <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "external",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_ext)
+```
+
+
+```{r}
+# Internalising behaviour mediator
+mediate_model <- lm(internal ~ ace_36mo + ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               internal, data = df)
+
+results_int <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "internal",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_int)
+```
+
+
+```{r}
+# Drug abuse
+mediate_model <- lm(ever_drugs ~ ace_36mo + ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               ever_drugs, data = df)
+
+results_drugs <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_drugs",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_drugs)
+```
+
+
+```{r}
+# Cigarettes
+mediate_model <- lm(ever_cig ~ ace_36mo + ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               ever_cig, data = df)
+
+results_cig <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_cig",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_cig)
+```
+
+
+```{r}
+# Alcohol
+mediate_model <- lm(ever_alcohol ~ ace_36mo + ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               ever_alcohol, data = df)
+
+results_alcohol <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_alcohol",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_alcohol)
+```
+
+```{r}
+# Depression
+mediate_model <- lm(depression ~ ace_36mo + ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               depression, data = df)
+
+results_depression <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "depression",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_depression)
+```
+```{r}
+# BMI
+mediate_model <- lm(bmi_6 ~ ace_36mo + ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               bmi_6, data = df)
+
+results_bmi <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "bmi_6",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_bmi)
+```
+
+
+# Poverty ACE
+
+```{r}
+# Poverty
+df_poverty <- count_ace %>%  
+  group_by(idnum) %>%
+  mutate(ace_12mo = sum(pov_2_cumu),
+         ace_36mo = sum(pov_3_cumu),
+         ace_60mo = sum(pov_4_cumu),
+         ace_108mo = sum(pov_5_cumu)) %>%
+  ungroup() %>%
+  
+  dplyr::select(idnum,
+                
+                # Outcome var
+                bmi_6, depression, anxiety,
+                
+                # Epigenetic clock data
+                grimAge_6_resid, phenoage_6_resid, duned_6,
+                grimAge_5_resid, phenoage_5_resid, duned_5,
+                
+                # Indep var
+                ace_12mo, ace_36mo, ace_60mo, ace_108mo,
+                starts_with("ace_") & ends_with("_cumu"),
+                
+                # Mediators
+                ever_alcohol, ever_cig, ever_drugs,
+                internal, external,
+#                
+                # Demographic variables
+                male, ethnic, m_race, m_edu, m_age, bmi_prs
+                ) %>%
+  mutate(male = as.factor(male),
+         ethnic = as.factor(ethnic),
+         m_race = as.factor(m_race),
+         m_edu = as.factor(m_edu))
+
+df_poverty_male <- df_poverty %>%
+  dplyr::filter(male == 1)
+
+df_poverty_female <- df_poverty %>%
+  dplyr::filter(male == 0)
+```
+
+Running SCLMA analyses
+
+```{r}
+set.seed(123)
+
+df <- hypFunc(df_poverty, 0)
+SCLMAfun(df,3)
+```
+
+## Multivariable OLS
+
+```{r}
+# Combined
+pov_pool <- lm(grimAge_6_resid ~ recency+ace_108mo+ace_12mo+
+               male + ethnic + m_race + m_edu + m_age, data = df)
+```
+
+## Mediation analyses
+
+```{r}
+# Externalising behaviour mediator
+mediate_model <- lm(external ~ recency + ace_12mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+
+full_model <- lm(grimAge_6_resid ~ recency + ace_12mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               external, data = df)
+
+cov_list_gender <- "ethnic + m_race + m_edu + m_age"
+
+results_ext <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "external",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_ext)
+```
+
+
+```{r}
+# Internalising behaviour mediator
+mediate_model <- lm(internal ~ recency + ace_12mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ recency + ace_12mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               internal, data = df)
+
+results_int <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "internal",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_int)
+```
+
+
+```{r}
+# Drug abuse
+mediate_model <- lm(ever_drugs ~ recency + ace_12mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ recency + ace_12mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               ever_drugs, data = df)
+
+results_drugs <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "ever_drugs",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_drugs)
+```
+
+
+```{r}
+# Cigarettes
+mediate_model <- lm(ever_cig ~ recency + ace_12mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ recency + ace_12mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               ever_cig, data = df)
+
+results_cig <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "ever_cig",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_cig)
+```
+
+
+```{r}
+# Alcohol
+mediate_model <- lm(ever_alcohol ~ recency + ace_12mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ recency + ace_12mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               ever_alcohol, data = df)
+
+results_alcohol <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "ever_alcohol",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_alcohol)
+```
+
+```{r}
+# Depression
+mediate_model <- lm(depression ~ recency + ace_12mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ recency + ace_12mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               depression, data = df)
+
+results_depression <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "depression",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_depression)
+```
+
+```{r}
+# BMI
+mediate_model <- lm(bmi_6 ~ recency + ace_12mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ recency + ace_12mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               bmi_6, data = df)
+
+results_bmi <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "bmi_6",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_bmi)
+```
+
+# Poverty Male
+
+Running SCLMA analyses
+
+```{r}
+set.seed(123)
+
+df <- hypFunc(df_poverty, 1)
+SCLMAfun(df,3)
+```
+
+## Multivariable OLS
+
+```{r}
+# OLS
+pov_male <- lm(grimAge_6_resid ~ ace_12mo + ace_108mo + ace_36mo +
+               ethnic + m_race + m_edu + m_age,
+             data = df)
+```
+
+
+## Mediation analyses
+
+```{r}
+# Externalising behaviour mediator
+mediate_model <- lm(external ~ ace_12mo + ace_36mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ace_36mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               external, data = df)
+
+cov_list_gender <- "ethnic + m_race + m_edu + m_age"
+
+results_ext <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "external",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_ext)
+```
+
+
+```{r}
+# Internalising behaviour mediator
+mediate_model <- lm(internal ~ ace_12mo + ace_36mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ace_36mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               internal, data = df)
+
+results_int <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "internal",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_int)
+```
+
+
+```{r}
+# Drug abuse
+mediate_model <- lm(ever_drugs ~ ace_12mo + ace_36mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ace_36mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               ever_drugs, data = df)
+
+results_drugs <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "ever_drugs",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_drugs)
+```
+
+
+```{r}
+# Cigarettes
+mediate_model <- lm(ever_cig ~ ace_12mo + ace_36mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ace_36mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               ever_cig, data = df)
+
+results_cig <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "ever_cig",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_cig)
+```
+
+
+```{r}
+# Alcohol
+mediate_model <- lm(ever_alcohol ~ ace_12mo + ace_36mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ace_36mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               ever_alcohol, data = df)
+
+results_alcohol <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "ever_alcohol",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_alcohol)
+```
+
+```{r}
+# Depression
+mediate_model <- lm(depression ~ ace_12mo + ace_36mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ace_36mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               depression, data = df)
+
+results_depression <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "depression",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_depression)
+```
+
+```{r}
+# BMI
+mediate_model <- lm(bmi_6 ~ ace_12mo + ace_36mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ace_36mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               bmi_6, data = df)
+
+results_bmi <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "bmi_6",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_bmi)
+```
+
+# Poverty Female
+
+Running SCLMA analyses
+
+```{r}
+set.seed(123)
+
+df <- hypFunc(df_poverty, 2)
+SCLMAfun(df,1)
+```
+
+## Multivariable OLS
+
+```{r}
+# Recency
+pov_female <- lm(grimAge_6_resid ~ recency + ethnic + m_race + m_edu + m_age,
+             data = df)
+```
+
+Table to compare results
+
+```{r}
+pov <- modelsummary(list("Pooled" = pov_pool,
+                  "Male" = pov_male,
+                  "Female" = pov_female),
+             stars = T,
+             estimate = "{estimate}{stars} [{conf.low}, {conf.high}]",
+             coef_rename = c("ace_36mo" = "Age 3 sensitive period",
+                             "ace_108mo" = "Age 9 sensitive period",
+                             "ace_60mo" = "Age 5 sensitive period",
+                             "ace_12mo" = "Age 1 sensitive period",
+                             "ace_12mo:male1" = "Age 1 X Male",
+                             "recency" = "Recency"),
+             gof_omit = "AIC|BIC|RMSE|Log|F|R2",
+             coef_omit = 5:16,
+             fmt = 2,
+             align = "llll", 
+             statistic = NULL, 
+             output = "gt",
+             notes = n
+             ) %>%
+  tab_options(table.width = pct(100),
+              table.font.size=13)
+```
+
+## Mediation analyses
+
+```{r}
+# Externalising behaviour mediator
+mediate_model <- lm(external ~ recency + ethnic + m_race + m_edu + m_age, data = df)
+
+full_model <- lm(grimAge_6_resid ~ recency + ethnic + m_race + m_edu + m_age + 
+               external, data = df)
+
+cov_list_gender <- "ethnic + m_race + m_edu + m_age"
+
+results_ext <- mediate(mediate_model, full_model, treat = "recency", mediator = "external",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_ext)
+```
+
+
+```{r}
+# Internalising behaviour mediator
+mediate_model <- lm(internal ~ recency + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ recency + ethnic + m_race + m_edu + m_age + 
+               internal, data = df)
+
+results_int <- mediate(mediate_model, full_model, treat = "recency", mediator = "internal",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_int)
+```
+
+
+```{r}
+# Drug abuse
+mediate_model <- lm(ever_drugs ~ recency + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ recency + ethnic + m_race + m_edu + m_age + 
+               ever_drugs, data = df)
+
+results_drugs <- mediate(mediate_model, full_model, treat = "recency", mediator = "ever_drugs",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_drugs)
+```
+
+
+```{r}
+# Cigarettes
+mediate_model <- lm(ever_cig ~ recency + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ recency + ethnic + m_race + m_edu + m_age + 
+               ever_cig, data = df)
+
+results_cig <- mediate(mediate_model, full_model, treat = "recency", mediator = "ever_cig",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_cig)
+```
+
+
+```{r}
+# Alcohol
+mediate_model <- lm(ever_alcohol ~ recency + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ recency + ethnic + m_race + m_edu + m_age + 
+               ever_alcohol, data = df)
+
+results_alcohol <- mediate(mediate_model, full_model, treat = "recency", mediator = "ever_alcohol",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_alcohol)
+```
+
+```{r}
+# Depression
+mediate_model <- lm(depression ~ recency + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ recency + ethnic + m_race + m_edu + m_age + 
+               depression, data = df)
+
+results_depression <- mediate(mediate_model, full_model, treat = "recency", mediator = "depression",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_depression)
+```
+
+```{r}
+# BMI
+mediate_model <- lm(bmi_6 ~ recency + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ recency + ethnic + m_race + m_edu + m_age + 
+               bmi_6, data = df)
+
+results_bmi <- mediate(mediate_model, full_model, treat = "recency", mediator = "bmi_6",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_bmi)
+```
+
+# Instability ACE
+
+```{r}
+# Subsetting instability-related variables
+
+df_instability <- count_ace %>%  
+  group_by(idnum) %>%
+  mutate(ace_12mo = sum(instability_2_cumu),
+         ace_36mo = sum(instability_3_cumu),
+         ace_60mo = sum(instability_4_cumu),
+         ace_108mo = sum(instability_5_cumu)) %>%
+  ungroup() %>%
+  
+  dplyr::select(idnum,
+                
+                # Outcome var
+                bmi_6, depression, anxiety,
+                
+                # Epigenetic clock data
+                grimAge_6_resid, phenoage_6_resid, duned_6,
+                grimAge_5_resid, phenoage_5_resid, duned_5,
+                
+                # Indep var
+                ace_12mo, ace_36mo, ace_60mo, ace_108mo,
+                starts_with("ace_") & ends_with("_cumu"),
+                
+                # Mediators
+                ever_alcohol, ever_cig, ever_drugs,
+                internal, external,
+#                
+                # Demographic variables
+                male, ethnic, m_race, m_edu, m_age, bmi_prs
+                ) %>%
+  mutate(male = as.factor(male),
+         ethnic = as.factor(ethnic),
+         m_race = as.factor(m_race),
+         m_edu = as.factor(m_edu))
+
+df_instability_male <- df_instability %>%
+  dplyr::filter(male == 1)
+
+df_instability_female <- df_instability %>%
+  dplyr::filter(male == 0)
+```
+
+Running SCLMA analyses
+
+```{r}
+set.seed(123)
+
+df <- hypFunc(df_instability, 0)
+SCLMAfun(df,1)
+```
+
+## Multivariable OLS
+
+```{r}
+# 3 years
+stab_pool <- lm(grimAge_6_resid ~ ace_36mo + male + ethnic + m_race + m_edu + m_age,
+             data = df)
+```
+
+## Mediation analyses
+
+```{r}
+# Externalising behaviour mediator
+mediate_model <- lm(external ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               external, data = df)
+
+cov_list_gender <- "ethnic + m_race + m_edu + m_age"
+
+results_ext <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "external",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_ext)
+```
+
+
+```{r}
+# Internalising behaviour mediator
+mediate_model <- lm(internal ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               internal, data = df)
+
+results_int <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "internal",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_int)
+```
+
+
+```{r}
+# Drug abuse
+mediate_model <- lm(ever_drugs ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               ever_drugs, data = df)
+
+results_drugs <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_drugs",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_drugs)
+```
+
+
+```{r}
+# Cigarettes
+mediate_model <- lm(ever_cig ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               ever_cig, data = df)
+
+results_cig <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_cig",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_cig)
+```
+
+
+```{r}
+# Alcohol
+mediate_model <- lm(ever_alcohol ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               ever_alcohol, data = df)
+
+results_alcohol <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_alcohol",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_alcohol)
+```
+
+```{r}
+# Depression
+mediate_model <- lm(depression ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               depression, data = df)
+
+results_depression <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "depression",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_depression)
+```
+
+```{r}
+# BMI
+mediate_model <- lm(bmi_6 ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               bmi_6, data = df)
+
+results_bmi <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "bmi_6",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_bmi)
+```
+
+# Instability Male
+
+Running SCLMA analyses
+
+```{r}
+set.seed(123)
+
+df <- hypFunc(df_instability_male, 1)
+SCLMAfun(df,1)
+```
+
+## Multivariable OLS
+
+```{r}
+# 3 years
+
+stab_male <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age,
+             data = df)
+```
+
+## Mediation analyses
+
+```{r}
+# Externalising behaviour mediator
+mediate_model <- lm(external ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               external, data = df)
+
+cov_list_gender <- "ethnic + m_race + m_edu + m_age"
+
+results_ext <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "external",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_ext)
+```
+
+
+```{r}
+# Internalising behaviour mediator
+mediate_model <- lm(internal ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               internal, data = df)
+
+results_int <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "internal",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_int)
+```
+
+
+```{r}
+# Drug abuse
+mediate_model <- lm(ever_drugs ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               ever_drugs, data = df)
+
+results_drugs <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_drugs",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_drugs)
+```
+
+
+```{r}
+# Cigarettes
+mediate_model <- lm(ever_cig ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               ever_cig, data = df)
+
+results_cig <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_cig",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_cig)
+```
+
+
+```{r}
+# Alcohol
+mediate_model <- lm(ever_alcohol ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               ever_alcohol, data = df)
+
+results_alcohol <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_alcohol",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_alcohol)
+```
+
+```{r}
+# Depression
+mediate_model <- lm(depression ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               depression, data = df)
+
+results_depression <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "depression",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_depression)
+```
+
+```{r}
+# BMI
+mediate_model <- lm(bmi_6 ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               bmi_6, data = df)
+
+results_bmi <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "bmi_6",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_bmi)
+```
+
+# Instability Female
+
+Running SCLMA analysis
+
+```{r}
+set.seed(123)
+
+df <- hypFunc(df_instability, 2)
+SCLMAfun(df,1)
+```
+
+## Multivariable OLS
+
+```{r}
+# 3 years
+stab_female <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age,
+             data = df)
+```
+
+Table to compare results
+
+```{r}
+stab <- modelsummary(list("Pooled" = stab_pool,
+                  "Male" = stab_male,
+                  "Female" = stab_female),
+             stars = T,
+             estimate = "{estimate}{stars} [{conf.low}, {conf.high}]",
+             coef_rename = c("ace_36mo" = "Age 3 sensitive period",
+                             "ace_108mo" = "Age 9 sensitive period",
+                             "ace_60mo" = "Age 5 sensitive period",
+                             "ace_12mo" = "Age 1 sensitive period",
+                             "ace_12mo:male1" = "Age 1 X Male",
+                             "recency" = "Recency"),
+             gof_omit = "AIC|BIC|RMSE|Log|F|R2",
+             coef_omit = 3:14,
+             fmt = 2,
+             align = "llll", 
+             statistic = NULL, 
+             output = "gt",
+             notes = n
+             ) %>%
+  tab_options(table.width = pct(100),
+              table.font.size=13)
+```
+
+## Mediation analyses
+
+```{r}
+# Externalising behaviour mediator
+mediate_model <- lm(external ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               external, data = df)
+
+cov_list_gender <- "ethnic + m_race + m_edu + m_age"
+
+results_ext <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "external",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_ext)
+```
+
+```{r}
+# Internalising behaviour mediator
+mediate_model <- lm(internal ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               internal, data = df)
+
+results_int <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "internal",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_int)
+```
+
+
+```{r}
+# Drug abuse
+mediate_model <- lm(ever_drugs ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               ever_drugs, data = df)
+
+results_drugs <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_drugs",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_drugs)
+```
+
+
+```{r}
+# Cigarettes
+mediate_model <- lm(ever_cig ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               ever_cig, data = df)
+
+results_cig <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_cig",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_cig)
+```
+
+
+```{r}
+# Alcohol
+mediate_model <- lm(ever_alcohol ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               ever_alcohol, data = df)
+
+results_alcohol <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_alcohol",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_alcohol)
+```
+
+```{r}
+# Depression
+mediate_model <- lm(depression ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               depression, data = df)
+
+results_depression <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "depression",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_depression)
+```
+
+```{r}
+# BMI
+mediate_model <- lm(bmi_6 ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               bmi_6, data = df)
+
+results_bmi <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "bmi_6",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_bmi)
+```
+
+# Deprivation ACE
+
+```{r}
+# Deprivation
+
+df_deprive <- count_ace %>%  
+  group_by(idnum) %>%
+  mutate(ace_12mo = sum(deprive_2_cumu),
+         ace_36mo = sum(deprive_3_cumu),
+         ace_60mo = sum(deprive_4_cumu),
+         ace_108mo = sum(deprive_5_cumu)) %>%
+  ungroup() %>%
+  
+  dplyr::select(idnum,
+                
+                # Outcome var
+                bmi_6, depression, anxiety,
+                
+                # Epigenetic clock data
+                grimAge_6_resid, phenoage_6_resid, duned_6,
+                grimAge_5_resid, phenoage_5_resid, duned_5,
+                
+                # Indep var
+                ace_12mo, ace_36mo, ace_60mo, ace_108mo,
+                starts_with("ace_") & ends_with("_cumu"),
+                
+                 # Mediators
+                ever_alcohol, ever_cig, ever_drugs,
+                internal, external,
+#                
+                # Demographic variables
+                male, ethnic, m_race, m_edu, m_age, bmi_prs
+                ) %>%
+  mutate(male = as.factor(male),
+         ethnic = as.factor(ethnic),
+         m_race = as.factor(m_race),
+         m_edu = as.factor(m_edu)) 
+
+df_deprive_male <- df_deprive %>%
+  dplyr::filter(male == 1)
+
+df_deprive_female <- df_deprive %>%
+  dplyr::filter(male == 0)
+```
+
+Running SCLMA analyses
+
+```{r}
+set.seed(123)
+
+df <- hypFunc(df_deprive, 0)
+SCLMAfun(df,1)
+```
+
+## Multivariable OLS
+
+```{r}
+# 3 years
+
+deprive_pool <- lm(grimAge_6_resid ~ ace_12mo + male + ethnic + m_race + m_edu + m_age,
+             data = df)
+
+```
+
+## Mediation analyses
+
+```{r}
+# Externalising behaviour mediator
+mediate_model <- lm(external ~ ace_12mo + ethnic + m_race + m_edu + m_age, data = df)
+
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ethnic + m_race + m_edu + m_age + 
+               external, data = df)
+
+cov_list_gender <- "ethnic + m_race + m_edu + m_age"
+
+results_ext <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "external",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_ext)
+```
+
+
+```{r}
+# Internalising behaviour mediator
+mediate_model <- lm(internal ~ ace_12mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ethnic + m_race + m_edu + m_age + 
+               internal, data = df)
+
+results_int <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "internal",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_int)
+```
+
+
+```{r}
+# Drug abuse
+mediate_model <- lm(ever_drugs ~ ace_12mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ethnic + m_race + m_edu + m_age + 
+               ever_drugs, data = df)
+
+results_drugs <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "ever_drugs",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_drugs)
+```
+
+
+```{r}
+# Cigarettes
+mediate_model <- lm(ever_cig ~ ace_12mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ethnic + m_race + m_edu + m_age + 
+               ever_cig, data = df)
+
+results_cig <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "ever_cig",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_cig)
+```
+
+
+```{r}
+# Alcohol
+mediate_model <- lm(ever_alcohol ~ ace_12mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ethnic + m_race + m_edu + m_age + 
+               ever_alcohol, data = df)
+
+results_alcohol <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "ever_alcohol",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_alcohol)
+```
+
+```{r}
+# Depression
+mediate_model <- lm(depression ~ ace_12mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ethnic + m_race + m_edu + m_age + 
+               depression, data = df)
+
+results_depression <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "depression",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_depression)
+```
+
+```{r}
+# BMI
+mediate_model <- lm(bmi_6 ~ ace_12mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ethnic + m_race + m_edu + m_age + 
+               bmi_6, data = df)
+
+results_bmi <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "bmi_6",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_bmi)
+```
+
+# Deprivation Male
+
+Running SCLMA analyses
+
+```{r}
+set.seed(123)
+
+df <- hypFunc(df_deprive, 1)
+SCLMAfun(df,2)   
+```
+
+## Multivariable OLS
+
+```{r}
+# 108mo + 60mo years
+deprive_male <- lm(grimAge_6_resid ~ ace_108mo + ace_60mo +  ethnic + m_race + m_edu + m_age,
+             data = df)
+```
+
+## Mediation analyses
+
+```{r}
+# Externalising behaviour mediator
+mediate_model <- lm(external ~ ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+
+full_model <- lm(grimAge_6_resid ~ ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               external, data = df)
+
+cov_list_gender <- "ethnic + m_race + m_edu + m_age"
+
+results_ext <- mediate(mediate_model, full_model, treat = "ace_60mo", mediator = "external",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_ext)
+```
+
+```{r}
+# Internalising behaviour mediator
+mediate_model <- lm(internal ~ ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               internal, data = df)
+
+results_int <- mediate(mediate_model, full_model, treat = "ace_60mo", mediator = "internal",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_int)
+```
+
+
+```{r}
+# Drug abuse
+mediate_model <- lm(ever_drugs ~ ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               ever_drugs, data = df)
+
+results_drugs <- mediate(mediate_model, full_model, treat = "ace_60mo", mediator = "ever_drugs",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_drugs)
+```
+
+
+```{r}
+# Cigarettes
+mediate_model <- lm(ever_cig ~ ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               ever_cig, data = df)
+
+results_cig <- mediate(mediate_model, full_model, treat = "ace_60mo", mediator = "ever_cig",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_cig)
+```
+
+
+```{r}
+# Alcohol
+mediate_model <- lm(ever_alcohol ~ ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               ever_alcohol, data = df)
+
+results_alcohol <- mediate(mediate_model, full_model, treat = "ace_60mo", mediator = "ever_alcohol",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_alcohol)
+```
+
+```{r}
+# Depression
+mediate_model <- lm(depression ~ ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               depression, data = df)
+
+results_depression <- mediate(mediate_model, full_model, treat = "ace_60mo", mediator = "depression",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_depression)
+```
+
+```{r}
+# BMI
+mediate_model <- lm(bmi_6 ~ ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_60mo + ace_108mo + ethnic + m_race + m_edu + m_age + 
+               bmi_6, data = df)
+
+results_bmi <- mediate(mediate_model, full_model, treat = "ace_60mo", mediator = "bmi_6",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_bmi)
+```
+
+# Deprivation Female
+
+Running SCLMA
+
+```{r}
+set.seed(123)
+
+df <- hypFunc(df_deprive, 2)
+SCLMAfun(df,2)  
+```
+
+## Multivariable OLS
+
+```{r}
+# 36mo + 12mo 
+deprive_female <- lm(grimAge_6_resid ~ ace_12mo + ace_36mo + ethnic + m_race + m_edu + m_age,
+             data = df)
+```
+
+Table to compare results
+
+```{r}
+deprive <- modelsummary(list("Pooled" = deprive_pool,
+                  "Male" = deprive_male,
+                  "Female" = deprive_female),
+             stars = T,
+             estimate = "{estimate}{stars} [{conf.low}, {conf.high}]",
+             coef_rename = c("ace_36mo" = "Age 3 sensitive period",
+                             "ace_108mo" = "Age 9 sensitive period",
+                             "ace_60mo" = "Age 5 sensitive period",
+                             "ace_12mo" = "Age 1 sensitive period",
+                             "ace_12mo:male1" = "Age 1 X Male",
+                             "recency" = "Recency"),
+             gof_omit = "AIC|BIC|RMSE|Log|F|R2",
+             coef_omit = 3:14,
+             fmt = 2,
+             align = "llll", 
+             statistic = NULL, 
+             output = "gt",
+             notes = n
+             ) %>%
+  tab_options(table.width = pct(100),
+              table.font.size=13)
+```
+
+## Mediation analyses
+
+```{r}
+# Externalising behaviour mediator
+mediate_model <- lm(external ~ ace_12mo + ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ace_36mo + ethnic + m_race + m_edu + m_age + 
+               external, data = df)
+
+cov_list_gender <- "ethnic + m_race + m_edu + m_age"
+
+results_ext <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "external",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_ext)
+```
+
+```{r}
+# Internalising behaviour mediator
+mediate_model <- lm(internal ~ ace_12mo + ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ace_36mo + ethnic + m_race + m_edu + m_age + 
+               internal, data = df)
+
+results_int <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "internal",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_int)
+```
+
+
+```{r}
+# Drug abuse
+mediate_model <- lm(ever_drugs ~ ace_12mo + ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ace_36mo + ethnic + m_race + m_edu + m_age + 
+               ever_drugs, data = df)
+
+results_drugs <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "ever_drugs",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_drugs)
+```
+
+
+```{r}
+# Cigarettes
+mediate_model <- lm(ever_cig ~ ace_12mo + ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ace_36mo + ethnic + m_race + m_edu + m_age + 
+               ever_cig, data = df)
+
+results_cig <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "ever_cig",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_cig)
+```
+
+
+```{r}
+# Alcohol
+mediate_model <- lm(ever_alcohol ~ ace_12mo + ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ace_36mo + ethnic + m_race + m_edu + m_age + 
+               ever_alcohol, data = df)
+
+results_alcohol <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "ever_alcohol",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_alcohol)
+```
+
+```{r}
+# Depression
+mediate_model <- lm(depression ~ ace_12mo + ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ace_36mo + ethnic + m_race + m_edu + m_age + 
+               depression, data = df)
+
+results_depression <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "depression",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_depression)
+```
+
+```{r}
+# BMI
+mediate_model <- lm(bmi_6 ~ ace_12mo + ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ace_36mo + ethnic + m_race + m_edu + m_age + 
+               bmi_6, data = df)
+
+results_bmi <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "bmi_6",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_bmi)
+```
+
+# Child Maltreatment ACE
+
+```{r}
+# Threat
+
+df_threat <- count_ace %>%  
+  group_by(idnum) %>%
+  mutate(ace_12mo = sum(threat_2_cumu),
+         ace_36mo = sum(threat_3_cumu),
+         ace_60mo = sum(threat_4_cumu),
+         ace_108mo = sum(threat_5_cumu)) %>%
+  ungroup() %>%
+  
+  dplyr::select(idnum,
+                
+                # Outcome var
+                bmi_6, depression, anxiety,
+                
+                # Epigenetic clock data
+                grimAge_6_resid, phenoage_6_resid, duned_6,
+                grimAge_5_resid, phenoage_5_resid, duned_5,
+                
+                # Indep var
+                ace_12mo, ace_36mo, ace_60mo, ace_108mo,
+                starts_with("ace_") & ends_with("_cumu"),
+                
+                # Mediators
+                ever_alcohol, ever_cig, ever_drugs,
+                internal, external,
+#                
+                # Demographic variables
+                male, ethnic, m_race, m_edu, m_age, bmi_prs
+                ) %>%
+  mutate(male = as.factor(male),
+         ethnic = as.factor(ethnic),
+         m_race = as.factor(m_race),
+         m_edu = as.factor(m_edu))
+
+df_threat_male <- df_threat %>%
+  dplyr::filter(male == 1)
+
+df_threat_female <- df_threat %>%
+  dplyr::filter(male == 0)
+```
+
+Running SCLMA analyses
+
+```{r}
+set.seed(123)
+
+df <- hypFunc(df_threat, 0)
+SCLMAfun(df,1)
+```
+
+## Multivariable OLS
+
+```{r}
+# 36mo
+
+threat_pool <- lm(grimAge_6_resid ~ ace_36mo + male + ethnic + m_race + m_edu + m_age,
+             data = df)
+```
+
+## Mediation analyses
+
+```{r}
+# Externalising behaviour mediator
+mediate_model <- lm(external ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               external, data = df)
+
+cov_list_gender <- "ethnic + m_race + m_edu + m_age"
+
+results_ext <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "external",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_ext)
+```
+
+
+```{r}
+# Internalising behaviour mediator
+mediate_model <- lm(internal ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               internal, data = df)
+
+results_int <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "internal",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_int)
+```
+
+
+```{r}
+# Drug abuse
+mediate_model <- lm(ever_drugs ~ ace_12mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ethnic + m_race + m_edu + m_age + 
+               ever_drugs, data = df)
+
+results_drugs <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "ever_drugs",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_drugs)
+```
+
+
+```{r}
+# Cigarettes
+mediate_model <- lm(ever_cig ~ ace_12mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ethnic + m_race + m_edu + m_age + 
+               ever_cig, data = df)
+
+results_cig <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "ever_cig",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_cig)
+```
+
+
+```{r}
+# Alcohol
+mediate_model <- lm(ever_alcohol ~ ace_12mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ethnic + m_race + m_edu + m_age + 
+               ever_alcohol, data = df)
+
+results_alcohol <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "ever_alcohol",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_alcohol)
+```
+
+```{r}
+# Depression
+mediate_model <- lm(depression ~ ace_12mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ethnic + m_race + m_edu + m_age + 
+               depression, data = df)
+
+results_depression <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "depression",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_depression)
+```
+
+```{r}
+# BMI
+mediate_model <- lm(bmi_6 ~ ace_12mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_12mo + ethnic + m_race + m_edu + m_age + 
+               bmi_6, data = df)
+
+results_bmi <- mediate(mediate_model, full_model, treat = "ace_12mo", mediator = "bmi_6",
+                       covariates = cov_list,
+                       sims=1000, boot=T)
+summary(results_bmi)
+```
+
+# Child Maltreatment Male
+
+Running SCLMA analyses
+
+```{r}
+set.seed(123)
+
+df <- hypFunc(df_threat, 1)
+SCLMAfun(df,2)
+```
+
+## Multivariable OLS
+
+```{r}
+# Ace 36mo + accumulation
+threat_male <- lm(grimAge_6_resid ~ ace_36mo + accumulation + ethnic + m_race + m_edu + m_age,
+             data = df)
+```
+
+## Mediation analyses
+
+```{r}
+# Externalising behaviour mediator
+mediate_model <- lm(external ~ ace_36mo + accumulation + ethnic + m_race + m_edu + m_age, data = df)
+
+full_model <- lm(grimAge_6_resid ~ ace_36mo + accumulation + ethnic + m_race + m_edu + m_age + 
+               external, data = df)
+
+cov_list_gender <- "ethnic + m_race + m_edu + m_age"
+
+results_ext <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "external",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_ext)
+```
+
+```{r}
+# Internalising behaviour mediator
+mediate_model <- lm(internal ~ ace_36mo + accumulation + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + accumulation + ethnic + m_race + m_edu + m_age + 
+               internal, data = df)
+
+results_int <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "internal",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_int)
+```
+
+
+```{r}
+# Drug abuse
+mediate_model <- lm(ever_drugs ~ ace_36mo + accumulation + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + accumulation + ethnic + m_race + m_edu + m_age + 
+               ever_drugs, data = df)
+
+results_drugs <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_drugs",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_drugs)
+```
+
+
+```{r}
+# Cigarettes
+mediate_model <- lm(ever_cig ~ ace_36mo + accumulation + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + accumulation + ethnic + m_race + m_edu + m_age + 
+               ever_cig, data = df)
+
+results_cig <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_cig",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_cig)
+```
+
+
+```{r}
+# Alcohol
+mediate_model <- lm(ever_alcohol ~ ace_36mo + accumulation + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + accumulation + ethnic + m_race + m_edu + m_age + 
+               ever_alcohol, data = df)
+
+results_alcohol <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_alcohol",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_alcohol)
+```
+
+```{r}
+# Depression
+mediate_model <- lm(depression ~ ace_36mo + accumulation + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + accumulation + ethnic + m_race + m_edu + m_age + 
+               depression, data = df)
+
+results_depression <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "depression",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_depression)
+```
+
+```{r}
+# BMI
+mediate_model <- lm(bmi_6 ~ ace_36mo + accumulation + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + accumulation + ethnic + m_race + m_edu + m_age + 
+               bmi_6, data = df)
+
+results_bmi <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "bmi_6",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_bmi)
+```
+
+
+# Child Maltreatment Female
+
+Running SCLMA analyses
+
+```{r}
+set.seed(123)
+
+df <- hypFunc(df_threat, 2)
+SCLMAfun(df,1)
+```
+
+## Multivariable OLS
+
+```{r}
+# Ace 36mo
+threat_female <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age,
+             data = df)
+```
+
+Table to compare results
+
+```{r}
+threat <- modelsummary(list("Pooled" = threat_pool,
+                  "Male" = threat_male,
+                  "Female" = threat_female),
+             stars = T,
+             estimate = "{estimate}{stars} [{conf.low}, {conf.high}]",
+             coef_rename = c("ace_36mo" = "Age 3 sensitive period",
+                             "ace_108mo" = "Age 9 sensitive period",
+                             "ace_60mo" = "Age 5 sensitive period",
+                             "ace_12mo" = "Age 1 sensitive period",
+                             "ace_12mo:male1" = "Age 1 X Male",
+                             "recency" = "Recency",
+                             "accumulation" = "Cumulative Risk"),
+             gof_omit = "AIC|BIC|RMSE|Log|F|R2",
+             coef_omit = 3:14,
+             fmt = 2,
+             align = "llll", 
+             statistic = NULL, 
+             output = "gt",
+             notes = n
+             ) %>%
+  tab_options(table.width = pct(100),
+              table.font.size=13)
+```
+
+## Mediation analyses
+
+```{r}
+# Externalising behaviour mediator
+mediate_model <- lm(external ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               external, data = df)
+
+cov_list_gender <- "ethnic + m_race + m_edu + m_age"
+
+results_ext <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "external",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_ext)
+```
+
+```{r}
+# Internalising behaviour mediator
+mediate_model <- lm(internal ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               internal, data = df)
+
+results_int <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "internal",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_int)
+```
+
+
+```{r}
+# Drug abuse
+mediate_model <- lm(ever_drugs ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               ever_drugs, data = df)
+
+results_drugs <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_drugs",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_drugs)
+```
+
+
+```{r}
+# Cigarettes
+mediate_model <- lm(ever_cig ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               ever_cig, data = df)
+
+results_cig <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_cig",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_cig)
+```
+
+
+```{r}
+# Alcohol
+mediate_model <- lm(ever_alcohol ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               ever_alcohol, data = df)
+
+results_alcohol <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "ever_alcohol",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_alcohol)
+```
+
+```{r}
+# Depression
+mediate_model <- lm(depression ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               depression, data = df)
+
+results_depression <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "depression",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_depression)
+```
+
+```{r}
+# BMI
+mediate_model <- lm(bmi_6 ~ ace_36mo + ethnic + m_race + m_edu + m_age, data = df)
+full_model <- lm(grimAge_6_resid ~ ace_36mo + ethnic + m_race + m_edu + m_age + 
+               bmi_6, data = df)
+
+results_bmi <- mediate(mediate_model, full_model, treat = "ace_36mo", mediator = "bmi_6",
+                       covariates = cov_list_gender,
+                       sims=1000, boot=T)
+summary(results_bmi)
+```
