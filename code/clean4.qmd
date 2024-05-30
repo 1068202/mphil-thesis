@@ -1,0 +1,288 @@
+```{r}
+# Loading Libraries
+library(tidyverse)
+library(haven)
+library(MASS)
+library(broom)
+library(knitr)
+library(modelsummary)
+library(lavaan)
+library(semPlot)
+library(kml)
+library(gbmt)
+library(broom.mixed)
+library(sjPlot)
+library(Amelia)
+library(lars)
+library(selectiveInference)
+library(glue)
+library(here)
+```
+
+
+```{r}
+# Loading data
+ff <- read_dta(here::here("Data","FF_allwaves_2024v1.dta"))
+bio <- read_dta(here::here("Data","biomarker_final_pub.dta"))
+pgs <- read_dta(here::here("Data", "PGS_Batch1_pub.dta"))
+
+# Subsetting relevant ff data 
+ff_subset <- ff %>%
+  dplyr::select(idnum, 
+                
+         # Depression
+         k6d2ac, k6d2c, k6d2n, k6d2x, k6d2s,
+         
+         # Anxiety
+         k6d2ag, k6d2ai, k6d2ak, k6d2d, k6d2j, k6d2t,
+                
+         # Demographics
+         cm1bsex, # Focal child sex
+         ck6ethrace, ck7ethrace, # Focal child race
+         cm1ethrace, # Mother's race
+         cm1edu, # Mother's education
+         cm1age, # Mother's age
+
+         ## Threat
+         m2e5, m2e5a, m2c4, m2c4a, m2b19, m2b19a, # Y1 
+         p3j3, p3j4, p3j6, p3j7, p3j8, p3j9, p3j10, p3j11, # Y3 
+         p3j13, p3j14, # Y3 
+         p4g3, p4g4, p4g6, p4g7, p4g8, p4g9, p4g10, p4g11, # Y5
+         p4g13, p4g14, # Y5 
+         p5q1c, p5q1d, p5q1f, p5q1g, p5q1h, p5q1i, p5q1j, # Y9
+         p5q1k, p5q1m, p5q1n, # Y15
+         k6c9c, k6c9d, p6d28, p6d29, # Y15
+         
+         ## Deprivation
+         m2b18a, m2b18b, m2b18c, m2b18d, m2b18e, m2b18g, m2h19b, # Y1
+         p3j15, p3j16, p3j17, p3j18, p3j19, # Y3
+         p4g15, p4g16, p4g17, p4g18, p4g19, # Y5
+         p5q2a, p5q2b, p5q2c, p5q2d, p5q2e, # Y9
+         p6h82, p6h84, p6h90, p6h92, k6c8, # Y15
+         
+         ## Unpredictability
+         cm1relf, cm1finjail, # Y1
+         m2h1a, cm2relf, cm2finjail,
+         m3i1a, cm3relf, m3k22, cm3finjail,
+         m4i1a, cm4relf, m4k22, cm4finjail,
+         m5i22, cm5relf, cm5finjail,
+         p6k34, cp6mrelf, p6g24, p6f35,
+         
+         # Socioeconomic
+         cm1inpov, cm2povco, cm3povco, cm4povco, cm5povco, cp6povco, # Mother Inc-Pov Ratio
+         
+         # Wave 7 outcome data
+         ck7preg1endage, ck7childrenpartners, ck7children, # fertility
+         ck7pregnancies, # child ever born
+ #        ck7lbw, # child birth weight
+         ck7edu, # education
+         ck7gad, # anxiety
+         ck7md_case_lib, # depression criteria
+         
+         # Mediator variables
+         k6d40, # ever smoked cigarette
+         k6d48, # ever alcohol
+         k6f63, # ever marijuana
+         k6f68, # other drugs 
+         
+         # Internalising behaviour
+         p6b36, p6b40, p6b52, p6b53, p6b54, p6b68, # Anxious/depressed behaviour
+         p6b65, p6b66, # Withdrawn
+         
+         # Externalising behaviour
+         p6b35, p6b37, p6b37, p6b39, p6b41, p6b42,
+         p6b43, p6b44, p6b45, p6b57, p6b59, # Aggressive behaviour
+         
+         p6b50, p6b51, p6b60, p6b61, p6b62, p6b63, p6b64 # Rule breaking behaviour
+         )
+
+# Converting all missing values to NA
+ff_subset[ff_subset < 0] <- NA
+
+# Creating ethnicity variable
+ff_subset <- ff_subset %>%
+  mutate(ethnic = ifelse(is.na(ck7ethrace), ck6ethrace, ck7ethrace))
+
+# Creating mediator variable
+ff_subset <- ff_subset %>%
+  mutate(ever_cig = ifelse(k6d40 == 1,1,0),
+         ever_alcohol = ifelse(k6d48 == 1,1,0),
+         ever_drugs = ifelse(k6f63 == 1 | k6f68 == 1, 1, 0))
+
+ff_subset <- ff_subset %>%
+  group_by(idnum) %>%
+  mutate(internal = mean(c_across(c(p6b36, p6b40, p6b52, p6b53, 
+                                    p6b54, p6b68,p6b65, p6b66)), na.rm=T),
+         external = mean(c_across(c(p6b35, p6b37, p6b37, p6b39, p6b41, p6b42,
+                                    p6b43, p6b44, p6b45, p6b57, p6b59,
+                                    p6b50, p6b51, p6b60, p6b61, p6b62, p6b63, p6b64)),
+                         na.rm=T)) %>%
+  ungroup() %>%
+  dplyr::select(-c(p6b36, p6b40, p6b52, p6b53,p6b54, p6b68,p6b65, p6b66,
+                   p6b35, p6b37, p6b37, p6b39, p6b41, p6b42,
+                   p6b43, p6b44, p6b45, p6b57, p6b59,
+                   p6b50, p6b51, p6b60, p6b61, p6b62, p6b63, p6b64,
+                   k6d40, k6d48, k6f63
+                   ))
+```
+
+
+```{r}
+# Subsetting BMI data
+bmi <- ff %>%
+  dplyr::select(idnum, ck7bmiz, ck6bmiz, ch6bmiz, ch5bmiz,ch4cbmi_z,ch3bmiz) %>%
+  mutate(bmi_3 = ifelse(ch3bmiz %in% c(-3, -9), NA, ch3bmiz),
+         bmi_4 = ifelse(ch4cbmi_z %in% c(-3, -9), NA, ch4cbmi_z),
+         bmi_5 = ifelse(ch5bmiz %in% c(-3, -9), NA, ch5bmiz),
+         bmi_6 = ifelse(is.na(ck6bmiz), ch6bmiz, ck6bmiz),
+         bmi_6 = ifelse(bmi_6 %in% c(-3, -9), NA, bmi_6), 
+         bmi_7 = ifelse(ck7bmiz %in% c(-3, -9), NA, ck7bmiz))
+
+bmi <- bmi[is.na(bmi$bmi_6) | bmi$bmi_6 >= -13, ] %>%
+  dplyr::select(idnum, bmi_6, bmi_7)
+```
+
+
+```{r}
+## Subsetting PGS data
+pgs_subset <- pgs %>%
+  dplyr::select(idnum, k5pgbmia, k5pgbmie, k5pgbmih
+                )
+
+# Cleaning data
+ff_subset[ff_subset<0] <- NA
+pgs_subset <- pgs_subset %>%
+  mutate(k5pgbmia = ifelse(k5pgbmia %in% c(-3, -7, -9), NA, k5pgbmia),
+         k5pgbmie = ifelse(k5pgbmie %in% c(-3, -7, -9), NA, k5pgbmie),
+         k5pgbmih = ifelse(k5pgbmih %in% c(-3, -7, -9), NA, k5pgbmih)) %>%
+  mutate(bmi_prs = coalesce(k5pgbmia, k5pgbmie, k5pgbmih)) %>%
+  dplyr::select(idnum, bmi_prs)
+```
+
+
+```{r}
+# Residualising model for grimAge wave 5
+resid_model_grim5me <- lm(k5me_grim~k5me_age, data = bio) # EPIC array
+resid_model_grim5mk <- lm(k5mk_grim~k5mk_age, data = bio) # 450K array
+
+# Residualising model for grimAge wave 6
+resid_model_grim6me <- lm(k6me_grim~k6me_age, data = bio) # EPIC array
+resid_model_grim6mk <- lm(k6mk_grim~k6mk_age, data = bio) # 450K array
+
+# Residualising model for grimAge wave 5 (PC adjusted)
+resid_model_pcgrim5me <- lm(k5me_pcgrim~k5me_age, data = bio) # EPIC array
+resid_model_pcgrim5mk <- lm(k5mk_pcgrim~k5mk_age, data = bio) # 450K array
+
+# Residualising model for grimAge wave 6 (PC adjusted)
+resid_model_pcgrim6me <- lm(k6me_pcgrim~k6me_age, data = bio) # EPIC array
+resid_model_pcgrim6mk <- lm(k6mk_pcgrim~k6mk_age, data = bio) # 450K array
+
+# Residualising model for phenoAge wave 5
+resid_model_phenoage5me <- lm(k5me_phenoage~k5me_age, data = bio) # EPIC array
+
+resid_model_phenoage5mk <- lm(k5mk_phenoage~k5mk_age, data = bio) # 450K array
+
+# Residualising model for phenoAge wave 6
+resid_model_phenoage6me <- lm(k6me_phenoage~k6me_age, data = bio) # EPIC array
+
+resid_model_phenoage6mk <- lm(k6mk_phenoage~k6mk_age, data = bio) # 450K array
+
+# Residualising model for phenoAge wave 5 (PC adjusted)
+resid_model_pcphenoage5me <- lm(k5me_pcphenoage~k5me_age, data = bio) # EPIC array
+
+resid_model_pcphenoage5mk <- lm(k5mk_pcphenoage~k5mk_age, data = bio) # 450K array
+
+# Residualising model for phenoAge wave 6 (PC adjusted)
+resid_model_pcphenoage6me <- lm(k6me_pcphenoage~k6me_age, data = bio) # EPIC array
+
+resid_model_pcphenoage6mk <- lm(k6mk_pcphenoage~k6mk_age, data = bio) # 450K array
+
+# Obtain residualised epigenetic ages 
+bio_subset <- bio %>%
+  
+  mutate(grim5me_hat = predict(resid_model_grim5me, newdata=bio), # grimAge EPIC array wave 5
+         grimAge_5_me_resid = grim5me_hat - k5me_grim,
+         grim5mk_hat = predict(resid_model_grim5mk, newdata=bio), # grimAge 450K array wave 5
+         grimAge_5_mk_resid = grim5mk_hat - k5mk_grim) %>%
+  
+  mutate(grim6me_hat = predict(resid_model_grim6me, newdata=bio), # grimAge EPIC array wave 6
+         grimAge_6_me_resid = grim6me_hat - k6me_grim,
+         grim6mk_hat = predict(resid_model_grim6mk, newdata=bio), # grimAge 450K array wave 6
+         grimAge_6_mk_resid = grim6mk_hat - k6mk_grim) %>%
+  
+  mutate(phenoage5me_hat = predict(resid_model_phenoage5me, newdata=bio), # phenoage EPIC array wave 5
+         phenoage_5_me_resid = phenoage5me_hat - k5me_phenoage,
+         phenoage5mk_hat = predict(resid_model_phenoage5mk, newdata=bio), # phenoage 450K array wave 5
+         phenoage_5_mk_resid = phenoage5mk_hat - k5mk_phenoage) %>%
+  
+  mutate(phenoage6me_hat = predict(resid_model_phenoage6me, newdata=bio), # phenoage EPIC array wave 5
+         phenoage_6_me_resid = phenoage6me_hat - k6me_phenoage,
+         phenoage6mk_hat = predict(resid_model_phenoage6mk, newdata=bio), # phenoage 450K array wave 5
+         phenoage_6_mk_resid = phenoage6mk_hat - k6mk_phenoage)
+```
+
+
+```{r}
+# Subset biomarker data
+bio_subset <- bio_subset %>%
+    mutate(grimAge_5_resid = ifelse(!is.na(grimAge_5_me_resid), grimAge_5_me_resid, grimAge_5_mk_resid),
+           grimAge_6_resid = ifelse(!is.na(grimAge_6_me_resid), grimAge_6_me_resid, grimAge_6_mk_resid),
+          
+           phenoage_5_resid = ifelse(!is.na(phenoage_5_me_resid), phenoage_5_me_resid, phenoage_5_mk_resid),
+           phenoage_6_resid = ifelse(!is.na(phenoage_6_me_resid), phenoage_6_me_resid, phenoage_6_mk_resid)) %>%
+  
+  mutate(grimAge_5 = ifelse(!is.na(k5me_grim), k5me_grim, k5mk_grim),
+         grimAge_6 = ifelse(!is.na(k6me_grim), k6me_grim, k6mk_grim),
+         
+         phenoage_5 = ifelse(!is.na(k5me_phenoage), k5me_phenoage, k5mk_phenoage),
+         phenoage_6= ifelse(!is.na(k6me_phenoage), k6me_phenoage, k6mk_phenoage),
+         
+         duned_5 = ifelse(!is.na(k5me_poam45), k5me_poam45, k5mk_poam45),
+         duned_6 = ifelse(!is.na(k6me_poam45), k6me_poam45, k6mk_poam45)
+           ) %>%
+  
+  mutate(chronAge_5 = ifelse(!is.na(k5me_age), k5me_age, k5mk_age),
+         chronAge_6 = ifelse(!is.na(k6me_age), k6me_age, k6mk_age)
+           ) %>%
+  
+  dplyr::select(idnum, 
+                chronAge_5, chronAge_6,
+                k5me_age, k5mk_age, # Chronological age (wave 5)
+                k6me_age, k6mk_age, # Chronological age (wave 6)
+                
+                grimAge_5, grimAge_6, # GrimAge - combined arrays
+                grimAge_5_resid, grimAge_6_resid, # GrimAge (residualised) - combined arrays
+
+                k5me_grim, k5mk_grim,
+                k6me_grim, k6mk_grim,
+                
+                grimAge_5_me_resid, grimAge_5_mk_resid, # GrimAge (residualised) - separate arrays
+                grimAge_6_me_resid, grimAge_6_mk_resid, # GrimAge (residualised) - separate arrays
+
+                phenoage_5, phenoage_6, # Phenoage - combined arrays
+                phenoage_5_resid, phenoage_6_resid, # Phenoage (residualised) - combined arrays
+                
+                k5me_phenoage, k5mk_phenoage,
+                k6me_phenoage, k6mk_phenoage,
+                
+                phenoage_5_me_resid, phenoage_5_mk_resid, # Phenoage (residualised) - separate arrays
+                phenoage_6_me_resid, phenoage_6_mk_resid, # Phenoage (residualised) - separate arrays
+
+                duned_5, duned_6, # Duned age - combined arrays
+                k5me_poam45, k5mk_poam45, # Duned (residualised) - separate arrays
+                k6me_poam45, k6mk_poam45) # Duned (residualised) - separate arrays
+```
+
+
+```{r}
+# Merging data
+df <- merge(bmi, ff_subset, by = "idnum", all.x = TRUE)
+df <- merge(df, bio_subset, by = "idnum", all.x = TRUE)
+df <- merge(df, pgs_subset, by = "idnum", all.x = TRUE)
+```
+
+
+```{r}
+# Output data
+save(df, file = "df4.RData")
+```

@@ -1,0 +1,422 @@
+First, I load the cleaned dataset
+
+```{r}
+load(here::here("code", "df4.RData"))
+```
+
+I create the four ACE events.
+
+```{r}
+# 1. Poverty
+poverty <- df %>%
+  # Yearly measure
+  mutate(ace_pov_1 = (cm1inpov - mean(cm1inpov, na.rm=T))/sd(cm1inpov, na.rm=T),
+         ace_pov_2 = (cm2povco - mean(cm2povco, na.rm=T))/sd(cm2povco, na.rm=T),
+         ace_pov_3 = (cm3povco - mean(cm3povco, na.rm=T))/sd(cm3povco, na.rm=T),
+         ace_pov_4 = (cm4povco - mean(cm4povco, na.rm=T))/sd(cm4povco, na.rm=T),
+         ace_pov_5 = (cm5povco - mean(cm5povco, na.rm=T))/sd(cm5povco, na.rm=T),
+         ace_pov_6 = (cp6povco - mean(cp6povco, na.rm=T))/sd(cp6povco, na.rm=T)
+         ) %>%
+  
+  # Cumulative
+  group_by(idnum) %>%
+  mutate(ace_pov = sum(ace_pov_1, ace_pov_2, ace_pov_3, ace_pov_4, cm5povco, cp6povco, na.rm=T)) %>%
+  
+  mutate(ace_pov_1_cumu = ifelse(cm1inpov < 1, 1, 0),
+         ace_pov_2_cumu = ifelse(cm2povco < 1, 1, 0),
+         ace_pov_3_cumu = ifelse(cm3povco < 1, 1, 0),
+         ace_pov_4_cumu = ifelse(cm4povco < 1, 1, 0),
+         ace_pov_5_cumu = ifelse(cm5povco < 1, 1, 0),
+         ace_pov_6_cumu = ifelse(cp6povco < 1, 1, 0),
+         ace_pov_cumu = sum(ace_pov_2_cumu, ace_pov_3_cumu,
+                            ace_pov_4_cumu, ace_pov_5_cumu, na.rm= T))  %>%
+  ungroup() %>%
+  
+  # Standardising
+  mutate(
+    ace_pov = (ace_pov - mean(ace_pov, na.rm=T))/sd(ace_pov, na.rm=T)
+    ) %>%
+  
+  dplyr::select(idnum, starts_with("ace_pov") & ends_with('cumu'))
+```
+
+```{r}
+# 2. Unpredictability/Instability
+df_subset <- df %>%
+  
+## Changes in marital/romantic status
+  mutate(rs_1 = ifelse(cm1relf == 1 | cm1relf == 2, 0, 1),
+         rs_2 = ifelse(cm2relf == 1 | cm2relf == 2, 0, 1),
+         rs_3 = ifelse(cm3relf == 1 | cm3relf == 2, 0, 1),
+         rs_4 = ifelse(cm4relf == 1 | cm4relf == 2, 0, 1),
+         rs_5 = ifelse(cm5relf == 1 | cm5relf == 2, 0, 1),
+         rs_6 = ifelse(cp6mrelf == 1 | cp6mrelf == 2, 0, 1)) %>%
+  
+  mutate(rs_chn_1 = rs_1,
+         rs_chn_2 = ifelse(is.na(rs_1), rs_2,
+                           ifelse(rs_2 == rs_1, 0, 1)),
+         rs_chn_3 = ifelse(is.na(rs_2), rs_3,
+                           ifelse(rs_3 == rs_2, 0, 1)),
+         rs_chn_4 = ifelse(is.na(rs_3), rs_4,
+                           ifelse(rs_4 == rs_3, 0, 1)),
+         rs_chn_5 = ifelse(is.na(rs_4), rs_5,
+                           ifelse(rs_5 == rs_4, 0, 1)),
+         rs_chn_6 = ifelse(is.na(rs_5), rs_6,
+                           ifelse(rs_6 == rs_5, 0, 1))
+         ) %>%
+
+  dplyr::select(idnum,
+                rs_chn_1, rs_chn_2, rs_chn_3, rs_chn_4,rs_chn_5, rs_chn_6)
+
+
+# Creating instability dataframe
+instability <- df_subset %>%
+  group_by(idnum) %>%
+  # Severity
+  mutate(ace_instability_1_cumu = rs_chn_1,
+         ace_instability_2_cumu = rs_chn_2,
+         ace_instability_3_cumu = rs_chn_3,
+         ace_instability_4_cumu = rs_chn_4,
+         ace_instability_5_cumu = rs_chn_5,
+         ace_instability_6_cumu = rs_chn_6,
+         ace_instability_cumu = sum(ace_instability_2_cumu, ace_instability_3_cumu,
+                                    ace_instability_4_cumu, ace_instability_5_cumu, na.rm=T) 
+         ) %>%
+  
+  ungroup() %>%
+  dplyr::select(idnum, starts_with("ace_instability") & ends_with("cumu"))
+```
+
+
+```{r}
+# 3. Threat
+df_subset <- df %>%
+  
+  # Reverse coding Wave 2
+  mutate(m2e5a = 5-m2e5a,
+         m2c4a = 5-m2c4a,
+         m2b19a = 5-m2b19a) %>%
+  
+  # Change all values of 7 to 0 because they didnt occur in that year (Wave 3-5)
+  mutate(across(c(p3j7, p3j4, p3j11, p3j13, p3j3,
+                p4g7, p4g4, p4g11, p4g13, p4g3, 
+                p5q1g, p5q1d, p5q1k, p5q1m, p5q1c,# Physical abuse
+                
+                p3j6, p3j10, p3j8, p3j14, p3j9,
+                p4g6, p4g10, p4g8, p4g14, p4g9, 
+                p5q1f, p5q1j, p5q1h, p5q1n, p5q1i, # Psychological abuse
+                
+               ), ~ ifelse(. == 7, NA, . ))) %>%
+  
+  # Recode fifth wave variable - scores of 8 refer to 'no exposure'
+  mutate(p5q1g = ifelse(p5q1g == 8, 0, p5q1g),
+         p5q1d = ifelse(p5q1d == 8, 0, p5q1d),
+         p5q1k = ifelse(p5q1k == 8, 0, p5q1k),
+         p5q1m = ifelse(p5q1m == 8, 0, p5q1m),
+         p5q1c = ifelse(p5q1c == 8, 0, p5q1c), # Physical abuse
+         
+         p5q1f = ifelse(p5q1f == 8, 0, p5q1f),
+         p5q1j = ifelse(p5q1j == 8, 0, p5q1j),
+         p5q1h = ifelse(p5q1h == 8, 0, p5q1h),
+         p5q1n = ifelse(p5q1n == 8, 0, p5q1n),
+         p5q1i = ifelse(p5q1i == 8, 0, p5q1i) # Psychological abuse 
+
+         ) %>% 
+  
+  # Recode sixth wave variable - shift entire score by 1 so 0 is baseline
+  mutate(k6c9c = ifelse(!is.na(k6c9c), k6c9c-1, k6c9c),
+         k6c9d = ifelse(!is.na(k6c9d), k6c9d-1, k6c9d),
+         p6d28 = ifelse(!is.na(p6d28), p6d28-1, p6d28),
+         p6d29 = ifelse(!is.na(p6d29), p6d29-1, p6d29)
+         ) %>%
+  
+  dplyr::select(idnum,
+                m2e5, m2c4, m2b19,
+                m2e5a, m2c4a, m2b19a,
+                
+                p3j7, p3j4, p3j11, p3j13, p3j3,
+                p4g7, p4g4, p4g11, p4g13, p4g3, 
+                p5q1g, p5q1d, p5q1k, p5q1m, p5q1c, 
+                
+                p3j6, p3j10, p3j8, p3j14, p3j9,
+                p4g6, p4g10, p4g8, p4g14, p4g9,
+                p5q1f, p5q1j, p5q1h, p5q1n, p5q1i,
+                
+                k6c9c, k6c9d, p6d28, p6d29)
+
+## Get rid of m2e5 and m2e5a cuz mostly missing
+
+threat <- df_subset %>%
+  # Creating yearly threat variables
+  group_by(idnum) %>%
+  mutate(ace_threat_2 = ifelse(m2c4 == 2 & m2b19 == 2, 0, 
+                         sum(m2c4a, m2b19a, na.rm=T)),
+         ace_threat_3 = sum(p3j7, p3j4, p3j11, p3j13, p3j3,
+                        p3j6, p3j10, p3j8, p3j14, p3j9,
+                        na.rm = T),
+         ace_threat_4 = sum(p4g7, p4g4, p4g11, p4g13, p4g3,
+                        p4g6, p4g10, p4g8, p4g14, p4g9,
+                        na.rm = T),
+         ace_threat_5 = sum(p5q1g, p5q1d, p5q1k, p5q1m, p5q1c,
+                        p5q1f, p5q1j, p5q1h, p5q1n, p5q1i,
+                        na.rm = T),
+         ace_threat_6 = sum(k6c9c, k6c9d, p6d28, p6d29),
+         ace_threat = sum(c_across(c(ace_threat_2, ace_threat_3, 
+                                     ace_threat_4, ace_threat_5)), na.rm=T)) %>%
+  
+  mutate(ace_threat_2_cumu = ifelse(ace_threat_2 > 0, 1, 0),
+         ace_threat_3_cumu = ifelse(ace_threat_3 > 0, 1, 0),
+         ace_threat_4_cumu = ifelse(ace_threat_4 > 0, 1, 0),
+         ace_threat_5_cumu = ifelse(ace_threat_5 > 0, 1, 0),
+         ace_threat_6_cumu = ifelse(ace_threat_6 > 0, 1, 0),
+         ace_threat_cumu = sum(ace_threat_2_cumu, ace_threat_3_cumu, ace_threat_4_cumu, ace_threat_5_cumu,
+                               na.rm=T)) %>%
+  
+  ungroup() %>%
+  
+  # Standardising
+  mutate(ace_threat_2 = (ace_threat_2 - mean(ace_threat_2, na.rm=T))/sd(ace_threat_2, na.rm=T),
+         ace_threat_3 = (ace_threat_3 - mean(ace_threat_3, na.rm=T))/sd(ace_threat_3, na.rm=T),
+         ace_threat_4 = (ace_threat_4 - mean(ace_threat_4, na.rm=T))/sd(ace_threat_4, na.rm=T),
+         ace_threat_5 = (ace_threat_5 - mean(ace_threat_5, na.rm=T))/sd(ace_threat_5, na.rm=T),
+         ace_threat_6 = (ace_threat_6 - mean(ace_threat_6, na.rm=T))/sd(ace_threat_6, na.rm=T),
+         ace_threat = (ace_threat - mean(ace_threat, na.rm=T))/sd(ace_threat, na.rm=T),) %>%
+  
+  dplyr::select(idnum, starts_with("ace_threat") & ends_with('cumu'))
+```
+
+```{r}
+# 4. Deprivation
+
+df_subset <- df %>%
+  
+  # Recoding Wave 2
+  mutate(deprive_a = ifelse(m2b18a == 201 | m2b18a == 7, 0,
+                            ifelse(m2b18a == 203, 2,
+                            ifelse(m2b18a == 204, 3,
+                            ifelse(m2b18a == 205, 4, 1)))),
+         
+         deprive_b = ifelse(m2b18b == 201 | m2b18b == 7, 0,
+                            ifelse(m2b18b == 203, 2,
+                            ifelse(m2b18b == 204, 3,
+                            ifelse(m2b18b == 205, 4, 1)))),
+         
+         deprive_c = ifelse(m2b18c == 201 | m2b18c == 7, 0,
+                            ifelse(m2b18c == 203, 2,
+                            ifelse(m2b18c == 204, 3,
+                            ifelse(m2b18c == 205, 4, 1)))),
+         
+         deprive_d = ifelse(m2b18d == 201 | m2b18d == 7, 0,
+                            ifelse(m2b18d == 203, 2,
+                            ifelse(m2b18d == 204, 3,
+                            ifelse(m2b18d == 205, 4, 1)))),
+         
+         deprive_e = ifelse(m2b18e == 201 | m2b18e == 7, 0,
+                            ifelse(m2b18e == 203, 2,
+                            ifelse(m2b18e == 204, 3,
+                            ifelse(m2b18e == 205, 4, 1)))),
+         
+         deprive_f = ifelse(m2b18g == 201 | m2b18g == 7, 0,
+                            ifelse(m2b18g == 203, 2,
+                            ifelse(m2b18g == 204, 3,
+                            ifelse(m2b18g == 205, 4, 1)))),
+         
+         deprive_g = ifelse(m2h19b == 2, 0, 1)) %>%
+ 
+  # Change all values of 7 to 0 because they didnt occur in that year
+  mutate(across(c(p3j15, p3j16, p3j17, p3j18, p3j19,
+                p4g15, p4g16, p4g17, p4g18, p4g19,
+                p5q2a, p5q2b, p5q2c, p5q2d, p5q2e
+                ), ~ ifelse(. == 7, NA, . ))) %>%
+  
+  # Change wave 5 values of 8 to 0 because they didn't occur
+  mutate(p5q2a = ifelse(p5q2a == 8, 0, p5q2a),
+         p5q2b = ifelse(p5q2b == 8, 0, p5q2b),
+         p5q2c = ifelse(p5q2c == 8, 0, p5q2c),
+         p5q2d = ifelse(p5q2d == 8, 0, p5q2d),
+         p5q2e = ifelse(p5q2e == 8, 0, p5q2e) # Neglect
+         ) %>%
+  
+  # Recode wave 6
+  mutate(k6c8 = ifelse(!is.na(k6c8), k6c8-1, k6c8)) %>%
+  
+  # Change max values to 4 to standardise across all waves
+  mutate(p3j15 = ifelse(p3j15 >= 4, 4, p3j15),
+         p3j16 = ifelse(p3j16 >= 4, 4, p3j16),
+         p3j17 = ifelse(p3j17 >= 4, 4, p3j17),
+         p3j18 = ifelse(p3j18 >= 4, 4, p3j18),
+         p3j19 = ifelse(p3j19 >= 4, 4, p3j19),
+         
+         p4g15 = ifelse(p4g15 >= 4, 4, p4g15),
+         p4g16 = ifelse(p4g16 >= 4, 4, p4g16),
+         p4g17 = ifelse(p4g17 >= 4, 4, p4g17),
+         p4g18 = ifelse(p4g18 >= 4, 4, p4g18),
+         p4g19 = ifelse(p4g19 >= 4, 4, p4g19),
+         
+         p5q2a = ifelse(p5q2a >= 4, 4, p5q2a),
+         p5q2b = ifelse(p5q2b >= 4, 4, p5q2b),
+         p5q2c = ifelse(p5q2c >= 4, 4, p5q2c),
+         p5q2d = ifelse(p5q2d >= 4, 4, p5q2d),
+         p5q2e = ifelse(p5q2e >= 4, 4, p5q2e)
+         
+         ) %>%
+  
+  group_by(idnum) %>%
+  
+  mutate(deprive_2 = sum(deprive_a, deprive_b, deprive_c, deprive_d,
+                         deprive_e, deprive_f, na.rm=T),
+         deprive_3 = sum(p3j15, p3j16, p3j17, p3j18, p3j19, na.rm=T),
+         deprive_4 = sum(p4g15, p4g16, p4g17, p4g18, p4g19, na.rm=T),
+         deprive_5 = sum(p5q2a, p5q2b, p5q2c, p5q2d, p5q2e, na.rm=T),
+         deprive_6 = k6c8,
+         deprive = sum(deprive_2, deprive_3, deprive_4, na.rm=T)) %>%
+  
+  ungroup()
+
+
+# Dataframe for deprivation
+deprivation <- df_subset %>%
+  # Standardising
+  mutate(ace_deprive_2 = (deprive_2 - mean(deprive_2, na.rm=T))/sd(deprive_2, na.rm=T),
+         ace_deprive_3 = (deprive_3 - mean(deprive_3, na.rm=T))/sd(deprive_3, na.rm=T),
+         ace_deprive_4 = (deprive_4 - mean(deprive_4, na.rm=T))/sd(deprive_4, na.rm=T),
+         ace_deprive_5 = (deprive_5 - mean(deprive_5, na.rm=T))/sd(deprive_5, na.rm=T),
+         ace_deprive_6 = (deprive_6 - mean(deprive_6, na.rm=T))/sd(deprive_6, na.rm=T),
+         ace_deprive = (deprive - mean(deprive, na.rm=T))/sd(deprive, na.rm=T),
+         ) %>%
+  
+  group_by(idnum) %>%
+  mutate(ace_deprive_2_cumu = ifelse(any(c_across(c(deprive_a, deprive_b,
+                                                    deprive_c, deprive_d,
+                                                    deprive_e, deprive_f,
+                                                    deprive_g))>0),1,0),
+         ace_deprive_3_cumu = ifelse(any(c_across(c(p3j15, p3j16, p3j17, p3j18, p3j19))>0),1,0),
+         ace_deprive_4_cumu = ifelse(any(c_across(c(p4g15, p4g16, p4g17, p4g18, p4g19))>0),1,0),
+         ace_deprive_5_cumu = ifelse(any(c_across(c(p5q2a, p5q2b, p5q2c, p5q2d, p5q2e))>0),1,0),
+         ace_deprive_6_cumu = ifelse(k6c8 > 0,1,0),
+         ace_deprive_cumu = sum(ace_deprive_2_cumu, ace_deprive_3_cumu, ace_deprive_4_cumu, ace_deprive_5_cumu, 
+                                na.rm=T)) %>%
+  ungroup() %>%
+  
+  dplyr::select(idnum, starts_with("ace_deprive") & ends_with("cumu"))
+
+```
+
+Then I create variables for depression 
+
+```{r}
+# Depression outcomes
+df <- df %>%
+  # reverse code negatively-phrased variables for depression
+  mutate(dep1_rc = 5-k6d2ac,
+           dep2_rc = 5-k6d2c,
+           dep3_rc = 5-k6d2n,
+           dep4_rc = 5-k6d2x,
+           dep5_rc = k6d2s+0
+           ) %>%
+ 
+  # Creating depression scale
+  group_by(idnum) %>%
+  mutate(depression = ifelse(all(is.na(c_across(starts_with("dep") & ends_with("_rc")))),
+                             NA_real_, 
+                             mean(c_across(ends_with("_rc") & ends_with("_rc")), na.rm = TRUE))
+  ) %>%
+  ungroup()
+
+summary(df$depression)
+```
+
+
+Then I create variables for anxiety
+
+```{r}
+# Anxiety outcomes
+df <- df %>%
+  # create new variables for anxiety
+  mutate(anx1_rc = 5-k6d2d,
+           anx2_rc = 5-k6d2j,
+           anx3_rc = 5-k6d2t,
+           anx4_rc = 5-k6d2ag,
+           anx5_rc = 5-k6d2ai,
+           anx6_rc = 5-k6d2ak
+           ) %>%
+ 
+  # Creating depression scale
+  group_by(idnum) %>%
+  mutate(anxiety = ifelse(all(is.na(c_across(ends_with("_rc") & starts_with("anx")))),
+                             NA_real_, 
+                             mean(c_across(ends_with("_rc") & starts_with("anx")), na.rm = TRUE))
+  ) %>%
+  ungroup()
+
+summary(df$anxiety)
+```
+
+
+
+```{r}
+# Combining ACES table
+aces <- merge(poverty, instability, by = "idnum", all.x = TRUE)
+aces <- merge(aces, threat, by = "idnum", all.x = TRUE)
+aces <- merge(aces, deprivation, by = "idnum", all.x = TRUE)
+```
+
+
+```{r}
+df <- df %>%
+
+  # Renaming demographic variables 
+  mutate(male = ifelse(cm1bsex == 1, 1, 0),
+         m_race = cm1ethrace,
+         m_edu = cm1edu,
+         m_age = cm1age) %>%
+  
+  # Subsetting relevant data
+  dplyr::select(idnum, ends_with("prs"),
+                bmi_6, depression, anxiety,
+                
+                # Mediator variables
+                ever_alcohol, ever_cig, ever_drugs,
+                internal, external,
+                
+                # Wave 7 outcome data
+                ck7preg1endage, ck7childrenpartners, 
+                ck7children, ck7pregnancies, ck7edu,
+                ck7gad, ck7md_case_lib, bmi_7,
+            
+                # Epigenetic clocks
+                chronAge_5, chronAge_6,
+                k5me_age, k5mk_age, # Chronological age (wave 5)
+                k6me_age, k6mk_age, # Chronological age (wave 6)
+                
+                grimAge_5, grimAge_6, # GrimAge - combined arrays
+                  k5me_grim, k5mk_grim, # GrimAge - separate arrays
+                  k6me_grim, k6mk_grim, # GrimAge - separate arrays
+                grimAge_5_resid, grimAge_6_resid, # GrimAge (residualised) - combined arrays
+                  grimAge_5_me_resid, grimAge_5_mk_resid, # GrimAge (residualised) - separate arrays
+                  grimAge_6_me_resid, grimAge_6_mk_resid, # GrimAge (residualised) - separate arrays
+                
+                phenoage_5, phenoage_6, # Phenoage - combined arrays
+                  k5me_phenoage, k5mk_phenoage, # Phenoage - separate arrays
+                  k6me_phenoage, k6mk_phenoage, # Phenoage - separate arrays
+                phenoage_5_resid, phenoage_6_resid, # Phenoage (residualised) - combined arrays
+                  phenoage_5_me_resid, phenoage_5_mk_resid, # Phenoage (residualised) - separate arrays
+                  phenoage_6_me_resid, phenoage_6_mk_resid, # Phenoage (residualised) - separate arrays
+                
+                duned_5, duned_6, # Duned age - combined arrays
+                  k6me_poam45, k6mk_poam45, # Duned - separate arrays
+                  k5me_poam45, k5mk_poam45, # Duned (residualised) - separate arrays
+                
+                # Demographics
+                male,ethnic,m_race, m_edu, m_age)
+
+# Merging final dataset
+aces <- merge(aces, df, by = "idnum", all.x = TRUE)
+```
+
+Output ACEs dataset to save time
+
+```{r}
+# Output data
+save(aces, file = "ace4.RData")
+```
